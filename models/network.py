@@ -19,6 +19,9 @@ class Network(BaseNetwork):
         self.beta_schedule = beta_schedule
         # Bai & Xu: 1x1 Convolution for Feature Extraction
         self.feature_extractor = nn.Conv2d(3, 3, kernel_size=1)
+        
+        # Hyper-parameter for Color Loss
+        self.color_loss_weight = kwargs.get('color_loss_weight', 0.1)
 
     def set_loss(self, loss_fn):
         self.loss_fn = loss_fn
@@ -108,8 +111,13 @@ class Network(BaseNetwork):
 
     def get_co_weights(self, y_cond, co_lambda=2.0):
         # CPTrans: Content-Aware Optimization
-        # 1. Compute spatial gradient
-        gradients = kornia.filters.spatial_gradient(y_cond)
+        
+        # 0. Pre-smoothing to suppress SAR speckle noise
+        # Using a 5x5 Gaussian kernel with sigma=1.5
+        y_cond_smooth = kornia.filters.gaussian_blur2d(y_cond, (5, 5), (1.5, 1.5))
+
+        # 1. Compute spatial gradient on smoothed image
+        gradients = kornia.filters.spatial_gradient(y_cond_smooth)
         
         # 2. Compute magnitude: sqrt(dx^2 + dy^2)
         dx = gradients[:, :, 0, :, :]
@@ -120,9 +128,13 @@ class Network(BaseNetwork):
         if magnitude.shape[1] > 1:
             magnitude = magnitude.mean(dim=1, keepdim=True)
             
-        # 3. Normalize magnitude to [0, 1]
-        mag_min = magnitude.min()
-        mag_max = magnitude.max()
+        # 3. Normalize magnitude to [0, 1] (Per-Instance Normalization)
+        # Flatten spatial dimensions to find min/max per image in batch
+        b, c, h, w = magnitude.shape
+        mag_flat = magnitude.view(b, -1)
+        mag_min = mag_flat.min(dim=1, keepdim=True)[0].view(b, 1, 1, 1)
+        mag_max = mag_flat.max(dim=1, keepdim=True)[0].view(b, 1, 1, 1)
+        
         normalized_magnitude = (magnitude - mag_min) / (mag_max - mag_min + 1e-6)
         
         # 4. Compute weights
@@ -172,7 +184,7 @@ class Network(BaseNetwork):
             blurred_gt = kornia.filters.gaussian_blur2d(y_0, kernel_size, sigma)
             
             loss_color = torch.nn.functional.mse_loss(blurred_pred, blurred_gt)
-            loss = loss + loss_color
+            loss = loss + self.color_loss_weight * loss_color
 
         return loss
 
