@@ -1,5 +1,7 @@
 import math
 import torch
+import torch.nn as nn
+import kornia
 from inspect import isfunction
 from functools import partial
 import numpy as np
@@ -15,6 +17,11 @@ class Network(BaseNetwork):
         
         self.denoise_fn = UNet(**unet)
         self.beta_schedule = beta_schedule
+        # Bai & Xu: 1x1 Convolution for Feature Extraction
+        self.feature_extractor = nn.Conv2d(3, 3, kernel_size=1)
+        
+        # Hyper-parameter for Color Loss
+        self.color_loss_weight = kwargs.get('color_loss_weight', 0.1)
 
     def set_loss(self, loss_fn):
         self.loss_fn = loss_fn
@@ -102,6 +109,38 @@ class Network(BaseNetwork):
                 ret_arr = torch.cat([ret_arr, y_t], dim=0)
         return y_t, ret_arr
 
+    def get_co_weights(self, y_cond, co_lambda=2.0):
+        # CPTrans: Content-Aware Optimization
+        
+        # 0. Pre-smoothing to suppress SAR speckle noise
+        # Using a 5x5 Gaussian kernel with sigma=1.5
+        y_cond_smooth = kornia.filters.gaussian_blur2d(y_cond, (5, 5), (1.5, 1.5))
+
+        # 1. Compute spatial gradient on smoothed image
+        gradients = kornia.filters.spatial_gradient(y_cond_smooth)
+        
+        # 2. Compute magnitude: sqrt(dx^2 + dy^2)
+        dx = gradients[:, :, 0, :, :]
+        dy = gradients[:, :, 1, :, :]
+        magnitude = torch.sqrt(dx ** 2 + dy ** 2 + 1e-6)
+        
+        # Average magnitude across channels if input is multi-channel
+        if magnitude.shape[1] > 1:
+            magnitude = magnitude.mean(dim=1, keepdim=True)
+            
+        # 3. Normalize magnitude to [0, 1] (Per-Instance Normalization)
+        # Flatten spatial dimensions to find min/max per image in batch
+        b, c, h, w = magnitude.shape
+        mag_flat = magnitude.view(b, -1)
+        mag_min = mag_flat.min(dim=1, keepdim=True)[0].view(b, 1, 1, 1)
+        mag_max = mag_flat.max(dim=1, keepdim=True)[0].view(b, 1, 1, 1)
+        
+        normalized_magnitude = (magnitude - mag_min) / (mag_max - mag_min + 1e-6)
+        
+        # 4. Compute weights
+        weights = 1.0 + co_lambda * normalized_magnitude
+        return weights.detach()
+
     def forward(self, y_0, y_cond=None, mask=None, noise=None):
         # sampling from p(gammas)
         b, *_ = y_0.shape
@@ -115,12 +154,38 @@ class Network(BaseNetwork):
         y_noisy = self.q_sample(
             y_0=y_0, sample_gammas=sample_gammas.view(-1, 1, 1, 1), noise=noise)
 
+        # Bai & Xu: Feature Extraction
+        fm = self.feature_extractor(y_cond)
+
         if mask is not None:
-            noise_hat = self.denoise_fn(torch.cat([y_cond, y_noisy*mask+(1.-mask)*y_0], dim=1), sample_gammas)
+            noise_hat = self.denoise_fn(torch.cat([fm, y_noisy*mask+(1.-mask)*y_0], dim=1), sample_gammas)
             loss = self.loss_fn(mask*noise, mask*noise_hat)
         else:
-            noise_hat = self.denoise_fn(torch.cat([y_cond, y_noisy], dim=1), sample_gammas)
-            loss = self.loss_fn(noise, noise_hat)
+            # Bai & Xu: Concatenate Feature Map
+            noise_hat = self.denoise_fn(torch.cat([fm, y_noisy], dim=1), sample_gammas)
+            
+            # CPTrans: Content-Aware Optimization
+            if self.training:
+                weights = self.get_co_weights(y_cond)
+                loss_pixel = (noise - noise_hat) ** 2
+                loss_weighted = loss_pixel * weights
+                loss = loss_weighted.mean()
+            else:
+                loss = self.loss_fn(noise, noise_hat)
+
+            # Bai & Xu: Color Supervision Loss
+            # Predict x0
+            y_0_hat = self.predict_start_from_noise(y_noisy, t, noise_hat)
+            
+            # Gaussian Blur
+            kernel_size = (11, 11)
+            sigma = (1.5, 1.5)
+            blurred_pred = kornia.filters.gaussian_blur2d(y_0_hat, kernel_size, sigma)
+            blurred_gt = kornia.filters.gaussian_blur2d(y_0, kernel_size, sigma)
+            
+            loss_color = torch.nn.functional.mse_loss(blurred_pred, blurred_gt)
+            loss = loss + self.color_loss_weight * loss_color
+
         return loss
 
 
