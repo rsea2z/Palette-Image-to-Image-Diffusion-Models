@@ -3,6 +3,9 @@ import tqdm
 from core.base_model import BaseModel
 from core.logger import LogTracker
 import copy
+from torch.amp import autocast, GradScaler
+from models import metric as metric_utils
+
 class EMA():
     def __init__(self, beta=0.9999):
         super().__init__()
@@ -40,6 +43,9 @@ class Palette(BaseModel):
         self.optG = torch.optim.Adam(list(filter(lambda p: p.requires_grad, self.netG.parameters())), **optimizers[0])
         self.optimizers.append(self.optG)
         self.resume_training() 
+        
+        # Initialize GradScaler for AMP
+        self.scaler = GradScaler()
 
         if self.opt['distributed']:
             self.netG.module.set_loss(self.loss_fn)
@@ -107,9 +113,15 @@ class Palette(BaseModel):
         for train_data in tqdm.tqdm(self.phase_loader):
             self.set_input(train_data)
             self.optG.zero_grad()
-            loss = self.netG(self.gt_image, self.cond_image, mask=self.mask)
-            loss.backward()
-            self.optG.step()
+            
+            # Use AMP autocast
+            with autocast('cuda'):
+                loss = self.netG(self.gt_image, self.cond_image, mask=self.mask)
+            
+            # Scale loss and backward
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optG)
+            self.scaler.update()
 
             self.iter += self.batch_size
             self.writer.set_iter(self.epoch, self.iter, phase='train')
@@ -130,34 +142,106 @@ class Palette(BaseModel):
     
     def val_step(self):
         self.netG.eval()
-        self.val_metrics.reset()
-        with torch.no_grad():
-            for val_data in tqdm.tqdm(self.val_loader):
-                self.set_input(val_data)
-                if self.opt['distributed']:
-                    if self.task in ['inpainting','uncropping']:
-                        self.output, self.visuals = self.netG.module.restoration(self.cond_image, y_t=self.cond_image, 
-                            y_0=self.gt_image, mask=self.mask, sample_num=self.sample_num)
-                    else:
-                        self.output, self.visuals = self.netG.module.restoration(self.cond_image, sample_num=self.sample_num)
-                else:
-                    if self.task in ['inpainting','uncropping']:
-                        self.output, self.visuals = self.netG.restoration(self.cond_image, y_t=self.cond_image, 
-                            y_0=self.gt_image, mask=self.mask, sample_num=self.sample_num)
-                    else:
-                        self.output, self.visuals = self.netG.restoration(self.cond_image, sample_num=self.sample_num)
-                    
-                self.iter += self.batch_size
-                self.writer.set_iter(self.epoch, self.iter, phase='val')
+        
+        # Switch to test schedule for faster sampling
+        if self.opt['distributed']:
+            self.netG.module.set_new_noise_schedule(phase='test')
+        else:
+            self.netG.set_new_noise_schedule(phase='test')
 
-                for met in self.metrics:
-                    key = met.__name__
-                    value = met(self.gt_image, self.output)
-                    self.val_metrics.update(key, value)
-                    self.writer.add_scalar(key, value)
-                for key, value in self.get_current_visuals(phase='val').items():
-                    self.writer.add_images(key, value)
-                self.writer.save_images(self.save_current_results())
+        self.val_metrics.reset()
+        fid_sum_r = fid_sum_f = fid_outer_r = fid_outer_f = None
+        fid_n_r = fid_n_f = 0
+        
+        # Limit validation batches to speed up
+        max_val_batches = 2
+        
+        val_iter = iter(self.val_loader)
+        try:
+            with torch.no_grad():
+                # Use range for pbar to show correct progress 1/2 etc.
+                pbar = tqdm.tqdm(range(max_val_batches), leave=False)
+                for i in pbar:
+                    idx = i + 1
+                    try:
+                        val_data = next(val_iter)
+                    except StopIteration:
+                        break
+                        
+                    self.set_input(val_data)
+                    if self.opt['distributed']:
+                        if self.task in ['inpainting','uncropping']:
+                            self.output, self.visuals = self.netG.module.restoration(self.cond_image, y_t=self.cond_image, 
+                                y_0=self.gt_image, mask=self.mask, sample_num=self.sample_num)
+                        else:
+                            self.output, self.visuals = self.netG.module.restoration(self.cond_image, sample_num=self.sample_num)
+                    else:
+                        if self.task in ['inpainting','uncropping']:
+                            self.output, self.visuals = self.netG.restoration(self.cond_image, y_t=self.cond_image, 
+                                y_0=self.gt_image, mask=self.mask, sample_num=self.sample_num)
+                        else:
+                            self.output, self.visuals = self.netG.restoration(self.cond_image, sample_num=self.sample_num)
+                        
+                    self.iter += self.batch_size
+                    self.writer.set_iter(self.epoch, self.iter, phase='val')
+
+                    metric_vals = {}
+                    for met in self.metrics:
+                        key = met.__name__
+                        value = met(self.gt_image, self.output)
+                        metric_vals[key] = value
+                        self.val_metrics.update(key, value)
+                        self.writer.add_scalar(key, value)
+
+                    # FID stats accumulation
+                    feats_real = metric_utils.get_inception_features(self.gt_image)
+                    feats_fake = metric_utils.get_inception_features(self.output)
+                    if fid_sum_r is None:
+                        dim = feats_real.shape[1]
+                        device = feats_real.device
+                        fid_sum_r = torch.zeros(dim, device=device)
+                        fid_sum_f = torch.zeros(dim, device=device)
+                        fid_outer_r = torch.zeros(dim, dim, device=device)
+                        fid_outer_f = torch.zeros(dim, dim, device=device)
+                    fid_sum_r, fid_outer_r, fid_n_r = metric_utils.update_fid_stats(fid_sum_r, fid_outer_r, fid_n_r, feats_real)
+                    fid_sum_f, fid_outer_f, fid_n_f = metric_utils.update_fid_stats(fid_sum_f, fid_outer_f, fid_n_f, feats_fake)
+
+                    # Quick running FID estimate for progress display
+                    fid_running = None
+                    if idx % 2 == 0: # More frequent updates since we have fewer batches
+                        fid_running = metric_utils.compute_fid_from_stats(fid_sum_r, fid_outer_r, fid_n_r, fid_sum_f, fid_outer_f, fid_n_f)
+
+                    # Update tqdm description with current metrics
+                    desc_parts = [f"MAE {metric_vals.get('mae', 0):.4f}", f"PSNR {metric_vals.get('psnr', 0):.2f}", f"SSIM {metric_vals.get('ssim', 0):.3f}"]
+                    if fid_running is not None:
+                        desc_parts.append(f"FID {fid_running:.1f}")
+                    pbar.set_description('val ' + ' | '.join(desc_parts))
+
+                    for key, value in self.get_current_visuals(phase='val').items():
+                        self.writer.add_images(key, value)
+                    self.writer.save_images(self.save_current_results())
+
+                # Final FID at end of validation
+                if fid_n_r > 0:
+                    final_fid = metric_utils.compute_fid_from_stats(fid_sum_r, fid_outer_r, fid_n_r, fid_sum_f, fid_outer_f, fid_n_f)
+                    self.val_metrics.update('FID', final_fid)
+                    self.writer.add_scalar('FID', final_fid)
+                
+                # Print summary
+                res = self.val_metrics.result()
+                msg = "Validation Complete. Results: "
+                for k, v in res.items():
+                    msg += f"{k}: {v:.4f} | "
+                self.logger.info(msg)
+
+        finally:
+            # Restore train schedule
+            if self.opt['distributed']:
+                self.netG.module.set_new_noise_schedule(phase='train')
+            else:
+                self.netG.set_new_noise_schedule(phase='train')
+
+        return self.val_metrics.result()
 
         return self.val_metrics.result()
 

@@ -9,7 +9,10 @@ from tqdm import tqdm
 from core.base_network import BaseNetwork
 class Network(BaseNetwork):
     def __init__(self, unet, beta_schedule, module_name='sr3', **kwargs):
-        super(Network, self).__init__(**kwargs)
+        init_type = kwargs.get('init_type', 'kaiming')
+        gain = kwargs.get('gain', 0.02)
+        super(Network, self).__init__(init_type=init_type, gain=gain)
+
         if module_name == 'sr3':
             from .sr3_modules.unet import UNet
         elif module_name == 'guided_diffusion':
@@ -100,7 +103,7 @@ class Network(BaseNetwork):
         
         y_t = default(y_t, lambda: torch.randn_like(y_cond))
         ret_arr = y_t
-        for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
+        for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps, leave=False):
             t = torch.full((b,), i, device=y_cond.device, dtype=torch.long)
             y_t = self.p_sample(y_t, t, y_cond=y_cond)
             if mask is not None:
@@ -115,7 +118,7 @@ class Network(BaseNetwork):
         # 0. Pre-smoothing to suppress SAR speckle noise
         # Using a 5x5 Gaussian kernel with sigma=1.5
         y_cond_smooth = kornia.filters.gaussian_blur2d(y_cond, (5, 5), (1.5, 1.5))
-
+        
         # 1. Compute spatial gradient on smoothed image
         gradients = kornia.filters.spatial_gradient(y_cond_smooth)
         

@@ -21,7 +21,9 @@ def make_dataset(dir):
     else:
         images = []
         assert os.path.isdir(dir), '%s is not a valid directory' % dir
-        for root, _, fnames in sorted(os.walk(dir)):
+        # Use os.scandir for faster non-recursive scanning if possible, but keep os.walk for compatibility
+        # However, removing sorted(os.walk) avoids consuming the whole generator into a list first
+        for root, _, fnames in os.walk(dir):
             for fname in sorted(fnames):
                 if is_image_file(fname):
                     path = os.path.join(root, fname)
@@ -172,5 +174,45 @@ class ColorizationDataset(data.Dataset):
 
     def __len__(self):
         return len(self.flist)
+
+
+class SARDataset(data.Dataset):
+    def __init__(self, data_root, data_len=-1, image_size=[256, 256], loader=pil_loader):
+        self.data_root = data_root
+        self.root_A = os.path.join(data_root, 'A')
+        self.root_B = os.path.join(data_root, 'B')
+        
+        self.A_paths = sorted(make_dataset(self.root_A))
+        self.B_paths = sorted(make_dataset(self.root_B))
+        
+        if data_len > 0:
+            self.A_paths = self.A_paths[:int(data_len)]
+            self.B_paths = self.B_paths[:int(data_len)]
+            
+        self.tfs = transforms.Compose([
+                transforms.Resize((image_size[0], image_size[1])),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5,0.5, 0.5])
+        ])
+        self.loader = loader
+        self.image_size = image_size
+
+    def __getitem__(self, index):
+        ret = {}
+        path_A = self.A_paths[index]
+        path_B = self.B_paths[index]
+        
+        # A is SAR (Condition), B is Optical (GT)
+        cond_image = self.tfs(self.loader(path_A))
+        gt_image = self.tfs(self.loader(path_B))
+
+        ret['gt_image'] = gt_image
+        ret['cond_image'] = cond_image
+        ret['path'] = path_A.rsplit("/")[-1].rsplit("\\")[-1]
+        return ret
+
+    def __len__(self):
+        return len(self.A_paths)
+
 
 

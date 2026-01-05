@@ -45,8 +45,8 @@ def init_obj(opt, logger, *args, default_file_name='default file', given_module=
             ret.__name__  = attr.__name__
             # ret = attr
         logger.info('{} [{:s}() form {:s}] is created.'.format(init_type, class_name, file_name))
-    except:
-        raise NotImplementedError('{} [{:s}() form {:s}] not recognized.'.format(init_type, class_name, file_name))
+    except Exception as e:
+        raise NotImplementedError('{} [{:s}() form {:s}] not recognized. Error: {}'.format(init_type, class_name, file_name, str(e)))
     return ret
 
 

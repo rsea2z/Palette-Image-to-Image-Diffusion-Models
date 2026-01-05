@@ -73,6 +73,7 @@ class CheckpointFunction(torch.autograd.Function):
         ctx.run_function = run_function
         ctx.input_tensors = list(args[:length])
         ctx.input_params = list(args[length:])
+        ctx.preserves_format = torch.is_autocast_enabled()
         with torch.no_grad():
             output_tensors = ctx.run_function(*ctx.input_tensors)
         return output_tensors
@@ -80,7 +81,7 @@ class CheckpointFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, *output_grads):
         ctx.input_tensors = [x.detach().requires_grad_(True) for x in ctx.input_tensors]
-        with torch.enable_grad():
+        with torch.enable_grad(), torch.amp.autocast(enabled=ctx.preserves_format, device_type='cuda'):
             # Fixes a bug where the first op in run_function modifies the
             # Tensor storage in place, which is not allowed for detach()'d
             # Tensors.
