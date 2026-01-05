@@ -168,7 +168,7 @@ class Network(BaseNetwork):
             noise_hat = self.denoise_fn(torch.cat([fm, y_noisy], dim=1), sample_gammas)
             
             # CPTrans: Content-Aware Optimization
-            if self.training:
+            if self.training and False:
                 weights = self.get_co_weights(y_cond)
                 loss_pixel = (noise - noise_hat) ** 2
                 loss_weighted = loss_pixel * weights
