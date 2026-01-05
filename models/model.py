@@ -37,7 +37,7 @@ class Palette(BaseModel):
         ''' networks can be a list, and must convert by self.set_device function if using multiple GPU. '''
         self.netG = self.set_device(self.netG, distributed=self.opt['distributed'])
         if self.ema_scheduler is not None:
-            self.netG_EMA = self.set_device(self.netG_EMA, distributed=self.opt['distributed'])
+            self.netG_EMA = self.set_device(self.netG_EMA, distributed=False)
         self.load_networks()
 
         self.optG = torch.optim.Adam(list(filter(lambda p: p.requires_grad, self.netG.parameters())), **optimizers[0])
@@ -53,6 +53,9 @@ class Palette(BaseModel):
         else:
             self.netG.set_loss(self.loss_fn)
             self.netG.set_new_noise_schedule(phase=self.phase)
+        
+        if self.ema_scheduler is not None:
+            self.netG_EMA.set_new_noise_schedule(phase=self.phase)
 
         ''' can rewrite in inherited class for more informations logging '''
         self.train_metrics = LogTracker(*[m.__name__ for m in losses], phase='train')

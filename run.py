@@ -4,6 +4,10 @@ import warnings
 import torch
 import torch.multiprocessing as mp
 
+# Filter out the specific FutureWarning from kornia or other libs
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.cuda.amp.custom_fwd.*")
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.cuda.amp.custom_bwd.*")
+
 from core.logger import VisualWriter, InfoLogger
 import core.praser as Praser
 import core.util as Util
