@@ -114,8 +114,9 @@ class VisualWriter():
             raise NotImplementedError('You must specify the context of name and result in save_current_results functions of model.')
 
     def close(self):
-        self.writer.close()
-        print('Close the Tensorboard SummaryWriter.')
+        if self.writer is not None:
+            self.writer.close()
+            print('Close the Tensorboard SummaryWriter.')
 
         
     def __getattr__(self, name):
@@ -126,7 +127,7 @@ class VisualWriter():
             return a blank function handle that does nothing
         """
         if name in self.tb_writer_ftns:
-            add_data = getattr(self.writer, name, None)
+            add_data = getattr(self.writer, name, None) if self.writer is not None else None
             def wrapper(tag, data, *args, **kwargs):
                 if add_data is not None:
                     # add phase(train/valid) tag

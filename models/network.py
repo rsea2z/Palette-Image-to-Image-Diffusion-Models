@@ -60,6 +60,11 @@ class Network(BaseNetwork):
             extract(self.sqrt_recipm1_gammas, t, y_t.shape) * noise
         )
 
+    def predict_start_from_noise_with_gammas(self, y_t, gammas, noise):
+        sqrt_recip_gammas = torch.sqrt(1.0 / gammas)
+        sqrt_recipm1_gammas = torch.sqrt(1.0 / gammas - 1.0)
+        return sqrt_recip_gammas * y_t - sqrt_recipm1_gammas * noise
+
     def q_posterior(self, y_0_hat, y_t, t):
         posterior_mean = (
             extract(self.posterior_mean_coef1, t, y_t.shape) * y_0_hat +
@@ -157,7 +162,7 @@ class Network(BaseNetwork):
         y_noisy = self.q_sample(
             y_0=y_0, sample_gammas=sample_gammas.view(-1, 1, 1, 1), noise=noise)
 
-        # Bai & Xu: Feature Extraction
+        # Bai & Xu: Feature Extraction with 1x1 Conv
         fm = self.feature_extractor(y_cond)
 
         if mask is not None:
@@ -166,8 +171,7 @@ class Network(BaseNetwork):
         else:
             # Bai & Xu: Concatenate Feature Map
             noise_hat = self.denoise_fn(torch.cat([fm, y_noisy], dim=1), sample_gammas)
-            
-            # CPTrans: Content-Aware Optimization
+            # CPTrans（保持关闭）或原始噪声损失
             if self.training and False:
                 weights = self.get_co_weights(y_cond)
                 loss_pixel = (noise - noise_hat) ** 2
@@ -176,16 +180,20 @@ class Network(BaseNetwork):
             else:
                 loss = self.loss_fn(noise, noise_hat)
 
-            # Bai & Xu: Color Supervision Loss
-            # Predict x0
-            y_0_hat = self.predict_start_from_noise(y_noisy, t, noise_hat)
-            
-            # Gaussian Blur
-            kernel_size = (11, 11)
-            sigma = (1.5, 1.5)
+            # 颜色监督损失：使用基于 sample_gammas 的精确反推
+            y_0_hat = self.predict_start_from_noise_with_gammas(
+                y_noisy,
+                sample_gammas.view(-1, 1, 1, 1),
+                noise_hat
+            )
+            # 数值稳定性
+            y_0_hat = torch.clamp(y_0_hat, -1.0, 1.0)
+
+            kernel_size = (5, 5)
+            sigma = (0.8, 0.8)
             blurred_pred = kornia.filters.gaussian_blur2d(y_0_hat, kernel_size, sigma)
             blurred_gt = kornia.filters.gaussian_blur2d(y_0, kernel_size, sigma)
-            
+
             loss_color = torch.nn.functional.mse_loss(blurred_pred, blurred_gt)
             loss = loss + self.color_loss_weight * loss_color
 

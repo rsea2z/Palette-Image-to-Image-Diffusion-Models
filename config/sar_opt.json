@@ -10,7 +10,7 @@
         "tb_logger": "tb_logger",
         "results": "results",
         "checkpoint": "checkpoint",
-        "resume_state": null
+        "resume_state": ""
     },
 
     "datasets": {
@@ -126,7 +126,7 @@
     },
 
     "train": {
-        "n_epoch": 100,
+        "n_epoch": 300,
         "n_iter": 1e8,
         "val_epoch": 5,
         "save_checkpoint_epoch": 5,

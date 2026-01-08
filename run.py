@@ -1,6 +1,7 @@
 import argparse
 import os
 import warnings
+import datetime
 import torch
 import torch.multiprocessing as mp
 
@@ -25,7 +26,8 @@ def main_worker(gpu, ngpus_per_node, opt):
             init_method = opt['init_method'],
             world_size = opt['world_size'], 
             rank = opt['global_rank'],
-            group_name='mtorch'
+            group_name='mtorch',
+            timeout=datetime.timedelta(seconds=3600)
         )
     '''set seed and and cuDNN environment '''
     torch.backends.cudnn.enabled = True

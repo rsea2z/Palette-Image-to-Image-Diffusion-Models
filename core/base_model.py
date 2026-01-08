@@ -56,6 +56,8 @@ class BaseModel():
                 self.save_everything()
 
             if self.epoch % self.opt['train']['val_epoch'] == 0:
+                if self.opt['distributed']:
+                    torch.distributed.barrier()
                 self.logger.info("\n\n\n------------------------------Validation Start------------------------------")
                 if self.val_loader is None:
                     self.logger.warning('Validation stop where dataloader is None, Skip it.')
@@ -63,6 +65,9 @@ class BaseModel():
                     val_log = self.val_step()
                     for key, value in val_log.items():
                         self.logger.info('{:5s}: {}\t'.format(str(key), value))
+                
+                if self.opt['distributed']:
+                    torch.distributed.barrier()
                 self.logger.info("\n------------------------------Validation End------------------------------\n\n")
         self.logger.info('Number of Epochs has reached the limit, End.')
 
@@ -119,7 +124,7 @@ class BaseModel():
         self.logger.info('Loading pretrained model from [{:s}] ...'.format(model_path))
         if isinstance(network, nn.DataParallel) or isinstance(network, nn.parallel.DistributedDataParallel):
             network = network.module
-        network.load_state_dict(torch.load(model_path, map_location = lambda storage, loc: Util.set_device(storage)), strict=strict)
+        network.load_state_dict(torch.load(model_path, map_location = lambda storage, loc: Util.set_device(storage), weights_only=True), strict=strict)
 
     def save_training_state(self):
         """ saves training state during training, only work on GPU 0 """
@@ -149,7 +154,7 @@ class BaseModel():
             return
 
         self.logger.info('Loading training state for [{:s}] ...'.format(state_path))
-        resume_state = torch.load(state_path, map_location = lambda storage, loc: self.set_device(storage))
+        resume_state = torch.load(state_path, map_location = lambda storage, loc: self.set_device(storage), weights_only=True)
         
         resume_optimizers = resume_state['optimizers']
         resume_schedulers = resume_state['schedulers']
